@@ -85,6 +85,15 @@ template <> std::string get_column(sqlite3_stmt *stmt, int column)
                        sqlite3_column_bytes(stmt, column));
 }
 
+class error : public std::runtime_error
+{
+  public:
+    explicit error(const std::string& message) :
+            std::runtime_error(message)
+    {
+    }
+};
+
 class statement
 {
     friend class database;
@@ -154,31 +163,44 @@ class statement
 
     statement &reset()
     {
-        sqlite3_reset(stmt);
+        auto rc = result(sqlite3_reset(stmt));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
         return *this;
     }
 
     statement &clear()
     {
-        sqlite3_clear_bindings(stmt);
+        auto rc = result(sqlite3_clear_bindings(stmt));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
         return *this;
     }
 
     statement &bind(int32_t i, int index = 1)
     {
         auto rc = result(sqlite3_bind_int(stmt, index, i));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
+
         return *this;
     }
 
     statement &bind(int64_t i, int index = 1)
     {
         auto rc = result(sqlite3_bind_int64(stmt, index, i));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
+
         return *this;
     }
 
     statement &bind(double d, int index = 1)
     {
         auto rc = result(sqlite3_bind_double(stmt, index, d));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
+
         return *this;
     }
 
@@ -189,14 +211,16 @@ class statement
                                            s.c_str(),
                                            -1,
                                            SQLITE_TRANSIENT));
+        if(rc != result::OK)
+            throw error(sqlite3_errmsg(db));
         return *this;
     }
 
     result step()
     {
         auto rc = result(sqlite3_step(stmt));
-        if(rc == result::ERROR)
-            throw std::runtime_error(sqlite3_errmsg(db));
+        if(rc < result::ROW)
+            throw error(sqlite3_errmsg(db));
         return rc;
     }
 
@@ -210,9 +234,9 @@ class statement
     std::tuple<TS...> row()
     {
         if (sqlite3_column_count(stmt) < sizeof...(TS))
-            throw std::runtime_error("Insufficient columns requested.");
+            throw error("Insufficient columns requested.");
         else if (sqlite3_column_count(stmt) > sizeof...(TS))
-            throw std::runtime_error("Excess columns requested.");
+            throw error("Excess columns requested.");
 
         int i = 0;
         return std::make_tuple(get_column<TS>(stmt, i++)...);
@@ -232,17 +256,16 @@ class statement
 
 class database
 {
-  public:;
+  public:
     database()
             : database(":memory:", SQLITE_OPEN_READWRITE)
     {}
 
     database(const std::string &path, int flags)
     {
-        int rc;
-        rc = sqlite3_open_v2(path.c_str(), &db, flags, nullptr);
-        if (rc)
-            std::cout << "Failed to open with error: " << rc << std::endl;
+        auto rc = result(sqlite3_open_v2(path.c_str(), &db, flags, nullptr));
+        if (rc != result::OK)
+            throw error(sqlite3_errmsg(db));
     }
 
     ~database()
@@ -253,11 +276,10 @@ class database
     std::unique_ptr<statement> prepare(const std::string &sql)
     {
         sqlite3_stmt *stmt;
-        int rc;
 
-        rc = sqlite3_prepare_v2(db, sql.data(), -1, &stmt, nullptr);
-        if (rc)
-            std::cout << "Prepare failed with code " << rc << std::endl;
+        auto rc = result(sqlite3_prepare_v2(db, sql.data(), -1, &stmt, nullptr));
+        if (rc != result::OK)
+            throw error(sqlite3_errmsg(db));
 
         return std::unique_ptr<statement>{ new statement(stmt, db)};
     }

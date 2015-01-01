@@ -50,4 +50,11 @@ int main()
                   << std::get<1>(r) << " "
                   << std::get<2>(r) << std::endl;
     }
+    try {
+        stmt->bind(4, 1);
+        stmt->bind("incomplete", 2);
+        stmt->step();
+    } catch(const error &e) {
+        std::cout << e.what() << std::endl;
+    }
 }
