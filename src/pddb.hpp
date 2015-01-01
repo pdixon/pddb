@@ -96,8 +96,6 @@ class error : public std::runtime_error
 
 class statement
 {
-    friend class database;
-
   public:
     template<class ...TS>
     class iterator
@@ -156,6 +154,10 @@ class statement
         statement *stmt;
     };
 
+    statement(sqlite3_stmt *stmt)
+            : stmt(stmt)
+    {}
+
     ~statement()
     {
         sqlite3_finalize(stmt);
@@ -165,7 +167,7 @@ class statement
     {
         auto rc = result(sqlite3_reset(stmt));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
         return *this;
     }
 
@@ -173,7 +175,7 @@ class statement
     {
         auto rc = result(sqlite3_clear_bindings(stmt));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
         return *this;
     }
 
@@ -181,7 +183,7 @@ class statement
     {
         auto rc = result(sqlite3_bind_int(stmt, index, i));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
 
         return *this;
     }
@@ -190,7 +192,7 @@ class statement
     {
         auto rc = result(sqlite3_bind_int64(stmt, index, i));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
 
         return *this;
     }
@@ -199,7 +201,7 @@ class statement
     {
         auto rc = result(sqlite3_bind_double(stmt, index, d));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
 
         return *this;
     }
@@ -212,7 +214,7 @@ class statement
                                            -1,
                                            SQLITE_TRANSIENT));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
         return *this;
     }
 
@@ -220,7 +222,7 @@ class statement
     {
         auto rc = result(sqlite3_step(stmt));
         if(rc < result::ROW)
-            throw error(sqlite3_errmsg(db));
+            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
         return rc;
     }
 
@@ -243,15 +245,10 @@ class statement
     }
 
   private:
-    statement(sqlite3_stmt *stmt, sqlite3 *db)
-            : stmt(stmt)
-            , db(db)
-    {}
     statement(const statement &) = delete;
     statement& operator=(const statement &) = delete;
 
     sqlite3_stmt *stmt;
-    sqlite3 *db;
 };
 
 class database
@@ -281,7 +278,7 @@ class database
         if (rc != result::OK)
             throw error(sqlite3_errmsg(db));
 
-        return std::unique_ptr<statement>{ new statement(stmt, db)};
+        return std::make_unique<statement>(stmt);
     }
 
     result execute(const std::string &sql)
