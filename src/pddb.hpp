@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <stdexcept>
 #include <iostream>
 #include <memory>
@@ -251,6 +252,22 @@ class statement
     sqlite3_stmt *stmt;
 };
 
+class database;
+
+class transaction
+{
+    friend class database;
+  public:
+    transaction(database& db);
+    ~transaction() noexcept;
+
+    void commit();
+
+  private:
+    bool commited;
+    database& db;
+};
+
 class database
 {
   public:
@@ -268,6 +285,11 @@ class database
     ~database()
     {
         sqlite3_close_v2(db);
+    }
+
+    std::unique_ptr<pddb::transaction> transaction()
+    {
+        return std::make_unique<pddb::transaction>(*this);
     }
 
     std::unique_ptr<statement> prepare(const std::string &sql)
@@ -293,4 +315,35 @@ class database
 
     sqlite3 *db;
 };
+
+transaction::transaction(database& db)
+        : commited(false),
+          db(db)
+{
+    db.execute("BEGIN");
+}
+
+transaction::~transaction() noexcept
+{
+    try {
+        if(!commited)
+        {
+            db.execute("ROLLBACK");
+        }
+    }
+    catch(const error &e)
+    {
+        assert(false);
+    }
+}
+
+void transaction::commit()
+{
+    if(!commited)
+    {
+        db.execute("COMMIT");
+        commited = true;
+    }
+}
+
 }

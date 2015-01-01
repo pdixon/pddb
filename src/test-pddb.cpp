@@ -57,4 +57,29 @@ int main()
     } catch(const error &e) {
         std::cout << e.what() << std::endl;
     }
+
+    std::cout << "\nTransaction Rollback" << std::endl;
+    {
+        auto t = db->transaction();
+        assert(db->execute("INSERT INTO test VALUES (5, 'Dont see this', 4.75)") == result::DONE);
+    }
+    query = db->prepare("SELECT * FROM test");
+    for(const auto &r: query->data<int, std::string, double>()) {
+        std::cout << std::get<0>(r) << ", "
+                  << std::get<1>(r) << ", "
+                  << std::get<2>(r) << std::endl;
+    }
+
+    std::cout << "\nTransaction Commit" << std::endl;
+    {
+        auto t = db->transaction();
+        assert(db->execute("INSERT INTO test VALUES (6, 'Do see this', 4.75)") == result::DONE);
+        t->commit();
+    }
+    for(const auto &r: query->data<int, std::string, double>()) {
+        std::cout << std::get<0>(r) << ", "
+                  << std::get<1>(r) << ", "
+                  << std::get<2>(r) << std::endl;
+    }
 }
+
