@@ -30,14 +30,17 @@ using namespace pddb;
 int main()
 {
     auto db = std::unique_ptr<database>{new database()};
-    auto stmt = db->prepare("CREATE TABLE test (id PRIMARY KEY, name STRING, d FLOAT);");
+    auto stmt = db->prepare(
+        "CREATE TABLE test (id PRIMARY KEY, name STRING, d FLOAT);");
     assert(stmt->step() == result::DONE);
-    assert(db->execute("INSERT INTO test VALUES (1, 'Hello World', 2.5)") == result::DONE);
-    assert(db->execute("INSERT INTO test VALUES (4, 'Just a Test', 4.75)") == result::DONE);
+    assert(db->execute("INSERT INTO test VALUES (1, 'Hello World', 2.5)") ==
+           result::DONE);
+    assert(db->execute("INSERT INTO test VALUES (4, 'Just a Test', 4.75)") ==
+           result::DONE);
     auto query = db->prepare("SELECT * FROM test");
-    for(const auto &r: query->data<int, std::string, double>()) {
-        std::cout << std::get<0>(r) << ", "
-                  << std::get<1>(r) << ", "
+    for(const auto &r : query->data<int, std::string, double>())
+    {
+        std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
     stmt = db->prepare("INSERT INTO test VALUES (?, ?, ?)");
@@ -45,41 +48,47 @@ int main()
     stmt->bind("And we can bind", 2);
     stmt->bind(3.14, 3);
     stmt->step();
-    for(const auto &r: query->data<int, std::string, double>()) {
-        std::cout << std::get<0>(r) << " "
-                  << std::get<1>(r) << " "
+    for(const auto &r : query->data<int, std::string, double>())
+    {
+        std::cout << std::get<0>(r) << " " << std::get<1>(r) << " "
                   << std::get<2>(r) << std::endl;
     }
-    try {
+    try
+    {
         stmt->bind(4, 1);
         stmt->bind("incomplete", 2);
         stmt->step();
-    } catch(const error &e) {
+    }
+    catch(const error &e)
+    {
         std::cout << e.what() << std::endl;
     }
 
     std::cout << "\nTransaction Rollback" << std::endl;
     {
         auto t = db->transaction();
-        assert(db->execute("INSERT INTO test VALUES (5, 'Dont see this', 4.75)") == result::DONE);
+        assert(
+            db->execute("INSERT INTO test VALUES (5, 'Dont see this', 4.75)") ==
+            result::DONE);
     }
     query = db->prepare("SELECT * FROM test");
-    for(const auto &r: query->data<int, std::string, double>()) {
-        std::cout << std::get<0>(r) << ", "
-                  << std::get<1>(r) << ", "
+    for(const auto &r : query->data<int, std::string, double>())
+    {
+        std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
 
     std::cout << "\nTransaction Commit" << std::endl;
     {
         auto t = db->transaction();
-        assert(db->execute("INSERT INTO test VALUES (6, 'Do see this', 4.75)") == result::DONE);
+        assert(
+            db->execute("INSERT INTO test VALUES (6, 'Do see this', 4.75)") ==
+            result::DONE);
         t->commit();
     }
-    for(const auto &r: query->data<int, std::string, double>()) {
-        std::cout << std::get<0>(r) << ", "
-                  << std::get<1>(r) << ", "
+    for(const auto &r : query->data<int, std::string, double>())
+    {
+        std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
 }
-
