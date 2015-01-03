@@ -69,29 +69,6 @@ enum class result
     DONE = 101,      /* sqlite3_step() has finished executing */
 };
 
-template <typename T>
-T get_column(sqlite3_stmt *stmt, int column);
-
-template <>
-int get_column(sqlite3_stmt *stmt, int column)
-{
-    return sqlite3_column_int(stmt, column);
-}
-
-template <>
-double get_column(sqlite3_stmt *stmt, int column)
-{
-    return sqlite3_column_double(stmt, column);
-}
-
-template <>
-std::string get_column(sqlite3_stmt *stmt, int column)
-{
-    return std::string(
-        reinterpret_cast<const char *>(sqlite3_column_text(stmt, column)),
-        sqlite3_column_bytes(stmt, column));
-}
-
 class error : public std::runtime_error
 {
   public:
@@ -213,6 +190,9 @@ class statement
         return rc;
     }
 
+    template <typename T>
+    T get_column(int column);
+
     template <class... TS>
     statement::rows<TS...> data()
     {
@@ -228,7 +208,7 @@ class statement
             throw error("Excess columns requested.");
 
         int i = 0;
-        return std::make_tuple(get_column<TS>(stmt, i++)...);
+        return std::make_tuple(get_column<TS>(i++)...);
     }
 
   private:
@@ -237,6 +217,26 @@ class statement
 
     sqlite3_stmt *stmt;
 };
+
+template <>
+int statement::get_column(int column)
+{
+    return sqlite3_column_int(stmt, column);
+}
+
+template <>
+double statement::get_column(int column)
+{
+    return sqlite3_column_double(stmt, column);
+}
+
+template <>
+std::string statement::get_column(int column)
+{
+    return std::string(
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, column)),
+        sqlite3_column_bytes(stmt, column));
+}
 
 class database;
 
