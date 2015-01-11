@@ -20,12 +20,79 @@
 
 #include "pddb.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 using namespace pddb;
+
+template <class F, class Tuple, std::size_t... I>
+auto apply_impl(F &&f, Tuple &&t, std::index_sequence<I...>)
+{
+    return std::forward<F>(f)(std::get<I>(std::forward<Tuple>(t))...);
+}
+
+template <class F, class Tuple>
+auto apply(F &&f, Tuple &&t)
+{
+    using Indices =
+        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>::value>;
+    return apply_impl(std::forward<F>(f), std::forward<Tuple>(t), Indices());
+}
+
+template <class F, class Tuple, std::size_t... I>
+auto build_impl(Tuple &&t, std::index_sequence<I...>)
+{
+    return F(std::get<I>(std::forward<Tuple>(t))...);
+}
+
+template <class F, class Tuple>
+auto build(Tuple &&t)
+{
+    using Indices =
+        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>::value>;
+    return build_impl<F>(std::forward<Tuple>(t), Indices());
+}
+
+template <typename T, class... Types>
+auto constructor()
+{
+    return [](Types... args){ return T(args...); };
+}
+
+template <typename T>
+auto construct = [](auto&&... args){ return T(args...); };
+
+void foo(int a, const std::string &b, double c)
+{
+    std::cout << a << ", " << b << ", " << c << std::endl;
+}
+
+class bar
+{
+    int a;
+    std::string b;
+    double c;
+
+  public:
+    bar(int a, std::string b, double c) : a(a), b(b), c(c){};
+    friend std::ostream &operator<<(std::ostream &os, bar b);
+};
+
+std::ostream &operator<<(std::ostream &os, bar b)
+{
+    os << b.a << ", " << b.b << ", " << b.c;
+    return os;
+}
+
+auto make_bar(int a, const std::string &b, double c) { return bar(a, b, c); }
+
 
 int main()
 {
@@ -91,4 +158,40 @@ int main()
         std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
+
+    std::cout << "\nApply result" << std::endl;
+    auto v = std::vector<bar>();
+    for(const auto &r : query->data<int, std::string, double>())
+    {
+        v.push_back(apply(make_bar, r));
+    }
+    std::copy(begin(v), end(v), std::ostream_iterator<bar>(std::cout, "\n"));
+
+    std::cout << "\nSTL FTW" << std::endl;
+    auto d = query->data<int, std::string, double>();
+    std::transform(begin(d), end(d),
+                   std::ostream_iterator<bar>(std::cout, "\n"),
+                   [](const auto &r)
+                   {
+        return build<bar>(r);
+    });
+
+    std::cout << "\nSTL FTW" << std::endl;
+    d = query->data<int, std::string, double>();
+    std::transform(begin(d), end(d),
+                   std::ostream_iterator<bar>(std::cout, "\n"),
+                   build<bar, std::tuple<int, std::string, double>>
+                   );
+
+
+    std::cout << "\nSTL FTW" << std::endl;
+    d = query->data<int, std::string, double>();
+    auto con = construct<bar>;
+    auto bound = [&con](const auto& r){ return apply(con, r); };
+
+    std::transform(begin(d), end(d),
+                   std::ostream_iterator<bar>(std::cout, "\n"),
+                   bound
+                   );
+
 }
