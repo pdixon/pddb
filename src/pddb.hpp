@@ -202,9 +202,11 @@ class statement
     template <class... TS>
     std::tuple<TS...> row()
     {
-        if(sqlite3_column_count(stmt) < sizeof...(TS))
+        auto count = static_cast<std::size_t>(sqlite3_column_count(stmt));
+
+        if(count < sizeof...(TS))
             throw error("Insufficient columns requested.");
-        else if(sqlite3_column_count(stmt) > sizeof...(TS))
+        else if(count > sizeof...(TS))
             throw error("Excess columns requested.");
 
         int i = 0;
