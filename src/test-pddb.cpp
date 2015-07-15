@@ -96,34 +96,29 @@ auto make_bar(int a, const std::string &b, double c) { return bar(a, b, c); }
 
 int main()
 {
-    auto db = std::unique_ptr<database>{new database()};
+    auto db = std::make_unique<database>();
     auto stmt = db->prepare(
         "CREATE TABLE test (id PRIMARY KEY, name STRING, d FLOAT);");
-    assert(stmt->step() == result::DONE);
-    assert(db->execute("INSERT INTO test VALUES (1, 'Hello World', 2.5)") ==
-           result::DONE);
-    assert(db->execute("INSERT INTO test VALUES (4, 'Just a Test', 4.75)") ==
-           result::DONE);
-    auto query = db->prepare("SELECT * FROM test");
-    for(const auto &r : query->data<int, std::string, double>())
+    assert(stmt->step());
+    db->execute("INSERT INTO test VALUES (1, 'Hello World', 2.5)");
+    db->execute("INSERT INTO test VALUES (4, 'Just a Test', 4.75)");
+    auto query = db->prepare<int, std::string, double>("SELECT * FROM test");
+    for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
     stmt = db->prepare("INSERT INTO test VALUES (?, ?, ?)");
-    stmt->bind(3, 1);
-    stmt->bind("And we can bind", 2);
-    stmt->bind(3.14, 3);
+    stmt->bind(3, "And we can bind", 3.14);
     stmt->step();
-    for(const auto &r : query->data<int, std::string, double>())
+    for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << " " << std::get<1>(r) << " "
                   << std::get<2>(r) << std::endl;
     }
     try
     {
-        stmt->bind(4, 1);
-        stmt->bind("incomplete", 2);
+        stmt->bind(4, "incomplete");
         stmt->step();
     }
     catch(const error &e)
@@ -133,13 +128,11 @@ int main()
 
     std::cout << "\nTransaction Rollback" << std::endl;
     {
-        auto t = db->transaction();
-        assert(
-            db->execute("INSERT INTO test VALUES (5, 'Dont see this', 4.75)") ==
-            result::DONE);
+        auto t = db->start_transaction();
+        db->execute("INSERT INTO test VALUES (5, 'Dont see this', 4.75)");
     }
-    query = db->prepare("SELECT * FROM test");
-    for(const auto &r : query->data<int, std::string, double>())
+    query = db->prepare<int, std::string, double>("SELECT * FROM test");
+    for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
@@ -147,13 +140,11 @@ int main()
 
     std::cout << "\nTransaction Commit" << std::endl;
     {
-        auto t = db->transaction();
-        assert(
-            db->execute("INSERT INTO test VALUES (6, 'Do see this', 4.75)") ==
-            result::DONE);
+        auto t = db->start_transaction();
+        db->execute("INSERT INTO test VALUES (6, 'Do see this', 4.75)");
         t->commit();
     }
-    for(const auto &r : query->data<int, std::string, double>())
+    for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
@@ -161,15 +152,14 @@ int main()
 
     std::cout << "\nApply result" << std::endl;
     auto v = std::vector<bar>();
-    for(const auto &r : query->data<int, std::string, double>())
+    for(const auto &r : *query)
     {
         v.push_back(apply(make_bar, r));
     }
     std::copy(begin(v), end(v), std::ostream_iterator<bar>(std::cout, "\n"));
 
     std::cout << "\nSTL FTW" << std::endl;
-    auto d = query->data<int, std::string, double>();
-    std::transform(begin(d), end(d),
+    std::transform(begin(*query), end(*query),
                    std::ostream_iterator<bar>(std::cout, "\n"),
                    [](const auto &r)
                    {
@@ -177,21 +167,28 @@ int main()
     });
 
     std::cout << "\nSTL FTW" << std::endl;
-    d = query->data<int, std::string, double>();
-    std::transform(begin(d), end(d),
+    std::transform(begin(*query), end(*query),
                    std::ostream_iterator<bar>(std::cout, "\n"),
                    build<bar, std::tuple<int, std::string, double>>
                    );
 
 
     std::cout << "\nSTL FTW" << std::endl;
-    d = query->data<int, std::string, double>();
     auto con = construct<bar>;
     auto bound = [&con](const auto& r){ return apply(con, r); };
 
-    std::transform(begin(d), end(d),
+    std::transform(begin(*query), end(*query),
                    std::ostream_iterator<bar>(std::cout, "\n"),
                    bound
                    );
 
+
+    std::cout << "\nNULL Query" << std::endl;
+    db->execute("INSERT INTO test VALUES (7, NULL, NULL)");
+    auto optional_query = db->prepare<int, optional<std::string>, optional<double>>("SELECT * FROM test");
+      for(const auto &r : *optional_query)
+    {
+        std::cout << std::get<0>(r) << ", " << std::get<1>(r).value_or("My NULL") << ", "
+                  << std::get<2>(r).value_or(0.0) << std::endl;
+    }
 }

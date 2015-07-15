@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Phillip Dixon
+// Copyright (C) 2014-15 Phillip Dixon
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,16 +20,18 @@
 
 #pragma once
 
+#include <experimental/optional>
 #include <cassert>
-#include <stdexcept>
-#include <iostream>
 #include <memory>
 #include <string>
-#include <tuple>
+#include <unordered_set>
+#include <vector>
 
-extern "C" {
-#include <sqlite3.h>
-}
+#define SQLITE_HAS_CODEC
+#include "sqlite3.h"
+
+using std::experimental::optional;
+using std::experimental::make_optional;
 
 namespace pddb
 {
@@ -75,258 +77,431 @@ class error : public std::runtime_error
     explicit error(const std::string &message) : std::runtime_error(message) {}
 };
 
-class statement
+class database_internal
 {
+    friend class database;
+    template <typename... TS>
+    friend class statement;
+    friend class transaction;
+
   public:
-    template <class... TS>
-    class iterator
-        : public std::iterator<std::input_iterator_tag, std::tuple<TS...>>
+    struct db
     {
-      public:
-        iterator() : stmt(nullptr), rc(result::DONE) {}
-
-        explicit iterator(statement *stmt) : stmt(stmt)
-        {
-            stmt->reset();
-            rc = stmt->step();
-        }
-
-        std::tuple<TS...> operator*() { return stmt->row<TS...>(); }
-
-        iterator &operator++()
-        {
-            rc = stmt->step();
-            return *this;
-        }
-
-        bool operator!=(const iterator &rhs) { return this->rc != rhs.rc; }
-
-      private:
-        statement *stmt;
-        result rc;
+        db() : db_(nullptr) {}
+        db(sqlite3 *db) : db_(db) {}
+        ~db() { sqlite3_close(db_); }
+        operator sqlite3 *() { return db_; }
+        sqlite3 *db_;
     };
 
-    template <class... TS>
-    class rows
+    struct stmt
     {
-      public:
-        rows(statement *stmt) : stmt(stmt){};
-
-        statement::iterator<TS...> begin()
+        stmt(sqlite3_stmt *stmt) : stmt_(stmt) {}
+        ~stmt() { sqlite3_finalize(stmt_); }
+        void clear(db &db)
         {
-            return statement::iterator<TS...>(this->stmt);
+            auto rc = result(sqlite3_clear_bindings(stmt_));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        bool step(db &db)
+        {
+            auto rc = result(sqlite3_step(stmt_));
+            if(rc < result::ROW)
+                throw error(sqlite3_errmsg(db));
+            return rc == result::DONE;
+        }
+        void reset(db &db)
+        {
+            auto rc = result(sqlite3_reset(stmt_));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        void bind(db &db, int column, int value)
+        {
+            auto rc = result(sqlite3_bind_int(stmt_, column, value));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        void bind(db &db, int column, int64_t value)
+        {
+            auto rc = result(sqlite3_bind_int64(stmt_, column, value));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        void bind(db &db, int column, double value)
+        {
+            auto rc = result(sqlite3_bind_double(stmt_, column, value));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        void bind(db &db, int column, std::string value)
+        {
+            auto rc = result(sqlite3_bind_text(stmt_, column, value.c_str(), -1,
+                                               SQLITE_TRANSIENT));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        void bind(db &db, int column, std::vector<uint8_t> value)
+        {
+            auto rc = result(sqlite3_bind_blob(stmt_, column, value.data(),
+                                               value.size(), SQLITE_TRANSIENT));
+            if(rc != result::OK)
+                throw error(sqlite3_errmsg(db));
+        }
+        optional<double> get_double(int column)
+        {
+            if(sqlite3_column_type(stmt_, column) == SQLITE_FLOAT)
+            {
+                return make_optional(sqlite3_column_double(stmt_, column));
+            }
+            else
+            {
+                return optional<double>();
+            }
+        }
+        optional<int64_t> get_int(int column)
+        {
+            if(sqlite3_column_type(stmt_, column) == SQLITE_INTEGER)
+            {
+                return make_optional(sqlite3_column_int64(stmt_, column));
+            }
+            else
+            {
+                return optional<int64_t>();
+            }
+        }
+        optional<std::string> get_string(int column)
+        {
+            if(sqlite3_column_type(stmt_, column) == SQLITE_TEXT)
+            {
+                const char *start = reinterpret_cast<const char *>(
+                    sqlite3_column_text(stmt_, column));
+                size_t length = sqlite3_column_bytes(stmt_, column);
+                return make_optional(std::string(start, length));
+            }
+            else
+            {
+                return optional<std::string>();
+            }
+        }
+        optional<std::vector<uint8_t>> get_blob(int column)
+        {
+            if(sqlite3_column_type(stmt_, column) == SQLITE_BLOB)
+            {
+                const uint8_t *start = reinterpret_cast<const uint8_t *>(
+                    sqlite3_column_blob(stmt_, column));
+                size_t length = sqlite3_column_bytes(stmt_, column);
+                return make_optional(
+                    std::vector<uint8_t>(start, start + length));
+            }
+            else
+            {
+                return optional<std::vector<uint8_t>>();
+            }
         }
 
-        statement::iterator<TS...> end()
-        {
-            return statement::iterator<TS...>();
-        }
-
-      private:
-        statement *stmt;
+        operator sqlite3_stmt *() { return stmt_; }
+        sqlite3_stmt *stmt_;
     };
 
-    statement(sqlite3_stmt *stmt) : stmt(stmt) {}
-
-    ~statement() { sqlite3_finalize(stmt); }
-
-    statement &reset()
+    database_internal(const std::string &path, int flags)
     {
-        auto rc = result(sqlite3_reset(stmt));
+        sqlite3 *d;
+        auto rc = result(sqlite3_open_v2(path.c_str(), &d, flags, nullptr));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-        return *this;
+            throw error(sqlite3_errmsg(d));
+        db_ = std::make_unique<db>(d);
     }
 
-    statement &clear()
+    database_internal(const std::string &path, const std::vector<uint8_t> &key,
+                      int flags)
     {
-        auto rc = result(sqlite3_clear_bindings(stmt));
+        sqlite3 *d;
+        auto rc = result(sqlite3_open_v2(path.c_str(), &d, flags, nullptr));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-        return *this;
-    }
-
-    statement &bind(int32_t i, int index = 1)
-    {
-        auto rc = result(sqlite3_bind_int(stmt, index, i));
+            throw error(sqlite3_errmsg(d));
+        rc = result(sqlite3_key(d, key.data(), key.size()));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-
-        return *this;
+            throw error(sqlite3_errmsg(d));
+        db_ = std::make_unique<db>(d);
     }
 
-    statement &bind(int64_t i, int index = 1)
+    void stmt_finalize(stmt *s)
     {
-        auto rc = result(sqlite3_bind_int64(stmt, index, i));
+        statements.erase(std::find_if(begin(statements), end(statements),
+                                      [=](const auto &i) -> bool
+                                      {
+                                          return i.get() == s;
+                                      }));
+    }
+
+    stmt *prepare(const std::string &sql)
+    {
+        sqlite3_stmt *s;
+
+        auto rc = result(sqlite3_prepare_v2(*db_, sql.data(), -1, &s, nullptr));
         if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
+            throw error(sqlite3_errmsg(*db_));
+        auto i = statements.emplace(std::make_unique<stmt>(s));
 
-        return *this;
+        return i.first->get();
     }
 
-    statement &bind(double d, int index = 1)
+    void execute(const std::string &sql)
     {
-        auto rc = result(sqlite3_bind_double(stmt, index, d));
-        if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-
-        return *this;
-    }
-
-    statement &bind(const std::string &s, int index = 1)
-    {
-        auto rc = result(
-            sqlite3_bind_text(stmt, index, s.c_str(), -1, SQLITE_TRANSIENT));
-        if(rc != result::OK)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-        return *this;
-    }
-
-    result step()
-    {
-        auto rc = result(sqlite3_step(stmt));
-        if(rc < result::ROW)
-            throw error(sqlite3_errmsg(sqlite3_db_handle(stmt)));
-        return rc;
-    }
-
-    template <typename T>
-    T get_column(int column);
-
-    template <class... TS>
-    statement::rows<TS...> data()
-    {
-        return statement::rows<TS...>(this);
-    }
-
-    template <class... TS>
-    std::tuple<TS...> row()
-    {
-        auto count = static_cast<std::size_t>(sqlite3_column_count(stmt));
-
-        if(count < sizeof...(TS))
-            throw error("Insufficient columns requested.");
-        else if(count > sizeof...(TS))
-            throw error("Excess columns requested.");
-
-        int i = 0;
-        return std::make_tuple(get_column<TS>(i++)...);
+        auto s = prepare(sql);
+        auto rc = result(sqlite3_step(*s));
+        if(rc != result::DONE)
+            throw error(sqlite3_errmsg(*db_));
+        stmt_finalize(s);
     }
 
   private:
-    statement(const statement &) = delete;
-    statement &operator=(const statement &) = delete;
-
-    sqlite3_stmt *stmt;
+    std::unordered_set<std::unique_ptr<stmt>> statements;
+    std::unique_ptr<db> db_;
 };
 
+template <typename T>
+T get_column(database_internal::stmt *s, int current);
+
 template <>
-int statement::get_column(int column)
+int get_column(database_internal::stmt *s, int current)
 {
-    return sqlite3_column_int(stmt, column);
+    return s->get_int(current).value_or(0);
+}
+
+#if 0
+template <>
+optional<int> get_column(database_internal::stmt *s, int current)
+{
+    return s->get_int(current);
+}
+#endif
+
+template <>
+int64_t get_column(database_internal::stmt *s, int current)
+{
+    return s->get_int(current).value_or(0);
 }
 
 template <>
-double statement::get_column(int column)
+optional<int64_t> get_column(database_internal::stmt *s, int current)
 {
-    return sqlite3_column_double(stmt, column);
+    return s->get_int(current);
 }
 
 template <>
-std::string statement::get_column(int column)
+double get_column(database_internal::stmt *s, int current)
 {
-    return std::string(
-        reinterpret_cast<const char *>(sqlite3_column_text(stmt, column)),
-        sqlite3_column_bytes(stmt, column));
+    return s->get_double(current).value_or(0.0);
 }
 
-class database;
+template <>
+optional<double> get_column(database_internal::stmt *s, int current)
+{
+    return s->get_double(current);
+}
+
+template <>
+std::string get_column(database_internal::stmt *s, int current)
+{
+    return s->get_string(current).value_or("");
+}
+
+template <>
+optional<std::string> get_column(database_internal::stmt *s, int current)
+{
+    return s->get_string(current);
+}
+
+template <>
+std::vector<uint8_t> get_column(database_internal::stmt *s, int current)
+{
+    return s->get_blob(current).value_or(std::vector<uint8_t>());
+}
+
+template <>
+optional<std::vector<uint8_t>> get_column(database_internal::stmt *s,
+                                          int current)
+{
+    return s->get_blob(current);
+}
 
 class transaction
 {
-    friend class database;
-
   public:
-    transaction(database &db);
-    ~transaction() noexcept;
+    transaction(std::weak_ptr<database_internal> db) : db(db)
+    {
+        db.lock()->execute("BEGIN");
+    }
 
-    void commit();
+    ~transaction() noexcept
+    {
+        try
+        {
+            if(!commited)
+            {
+                db.lock()->execute("ROLLBACK");
+            }
+        }
+        catch(const error &e)
+        {
+            assert(false);
+        }
+    }
+
+    void commit()
+    {
+        if(!commited)
+        {
+            db.lock()->execute("COMMIT");
+            commited = true;
+        }
+    }
 
   private:
     bool commited;
-    database &db;
+    std::weak_ptr<database_internal> db;
+};
+
+template <typename... TS>
+class statement
+{
+  public:
+    class iterator
+    {
+      public:
+        iterator(statement &s, bool end = false) : s_(s), end_(end) {}
+
+        std::tuple<TS...> operator*() { return s_.row(); }
+
+        iterator &operator++()
+        {
+            end_ = s_.step();
+            return *this;
+        }
+
+        bool operator!=(const iterator &rhs) { return end_ != rhs.end_; }
+
+      private:
+        statement &s_;
+        bool end_;
+    };
+
+    statement(database_internal::stmt *s, std::weak_ptr<database_internal> db)
+        : stmt_(s), db(db)
+    {
+    }
+
+    ~statement()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            locked->stmt_finalize(stmt_);
+        }
+    }
+
+    template <typename... Args>
+    void bind(const Args &... args)
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            stmt_->clear(*locked->db_);
+            bind_(locked, 1, args...);
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+    bool step()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            return stmt_->step(*locked->db_);
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+    std::tuple<TS...> row()
+    {
+        int i = 0;
+        return std::make_tuple(get_column<TS>(stmt_, i++)...);
+    }
+
+    iterator begin()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            stmt_->reset(*locked->db_);
+            return iterator{*this};
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+    iterator end() { return iterator{*this, true}; }
+
+  private:
+    template <typename T, typename... Args>
+    void bind_(std::shared_ptr<database_internal> db_, int current, T first,
+               const Args &... rest)
+    {
+        stmt_->bind(*db_->db_, current, first);
+        bind_(db_, current + 1, rest...);
+    }
+
+    void bind_(std::shared_ptr<database_internal>, int)
+    {
+        // catch the end case
+        return;
+    }
+
+    database_internal::stmt *stmt_;
+    std::weak_ptr<database_internal> db;
 };
 
 class database
 {
   public:
-    database() : database(":memory:", SQLITE_OPEN_READWRITE) {}
-
+    database()
+        : db(std::make_shared<database_internal>(":memory:",
+                                                 SQLITE_OPEN_READWRITE))
+    {
+    }
     database(const std::string &path, int flags)
+        : db(std::make_shared<database_internal>(path, flags))
     {
-        auto rc = result(sqlite3_open_v2(path.c_str(), &db, flags, nullptr));
-        if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
+    }
+    std::unique_ptr<transaction> start_transaction()
+    {
+        return std::make_unique<transaction>(db);
     }
 
-    ~database() { sqlite3_close_v2(db); }
-
-    std::unique_ptr<pddb::transaction> transaction()
+    template <typename... TS>
+    std::unique_ptr<statement<TS...>> prepare(const std::string &sql)
     {
-        return std::make_unique<pddb::transaction>(*this);
+        return std::make_unique<statement<TS...>>(db->prepare(sql), db);
     }
 
-    std::unique_ptr<statement> prepare(const std::string &sql)
+    void execute(const std::string& sql)
     {
-        sqlite3_stmt *stmt;
-
-        auto rc =
-            result(sqlite3_prepare_v2(db, sql.data(), -1, &stmt, nullptr));
-        if(rc != result::OK)
-            throw error(sqlite3_errmsg(db));
-
-        return std::make_unique<statement>(stmt);
-    }
-
-    result execute(const std::string &sql)
-    {
-        auto stmt = prepare(sql);
-        return result(stmt->step());
+        db->execute(sql);
     }
 
   private:
-    database(const database &) = delete;
-    database &operator=(const database &) = delete;
-
-    sqlite3 *db;
+    std::shared_ptr<database_internal> db;
+};
 };
 
-transaction::transaction(database &db) : commited(false), db(db)
-{
-    db.execute("BEGIN");
-}
-
-transaction::~transaction() noexcept
-{
-    try
-    {
-        if(!commited)
-        {
-            db.execute("ROLLBACK");
-        }
-    }
-    catch(const error &e)
-    {
-        assert(false);
-    }
-}
-
-void transaction::commit()
-{
-    if(!commited)
-    {
-        db.execute("COMMIT");
-        commited = true;
-    }
-}
-}
