@@ -33,20 +33,6 @@
 using namespace pddb;
 
 template <class F, class Tuple, std::size_t... I>
-auto apply_impl(F &&f, Tuple &&t, std::index_sequence<I...>)
-{
-    return std::forward<F>(f)(std::get<I>(std::forward<Tuple>(t))...);
-}
-
-template <class F, class Tuple>
-auto apply(F &&f, Tuple &&t)
-{
-    using Indices =
-        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>::value>;
-    return apply_impl(std::forward<F>(f), std::forward<Tuple>(t), Indices());
-}
-
-template <class F, class Tuple, std::size_t... I>
 auto build_impl(Tuple &&t, std::index_sequence<I...>)
 {
     return F(std::get<I>(std::forward<Tuple>(t))...);
@@ -63,11 +49,17 @@ auto build(Tuple &&t)
 template <typename T, class... Types>
 auto constructor()
 {
-    return [](Types... args){ return T(args...); };
+    return [](Types... args)
+    {
+        return T(args...);
+    };
 }
 
 template <typename T>
-auto construct = [](auto&&... args){ return T(args...); };
+auto construct = [](auto &&... args)
+{
+    return T(args...);
+};
 
 void foo(int a, const std::string &b, double c)
 {
@@ -93,24 +85,22 @@ std::ostream &operator<<(std::ostream &os, bar b)
 
 auto make_bar(int a, const std::string &b, double c) { return bar(a, b, c); }
 
-
 int main()
 {
     auto db = std::make_unique<database>();
-    auto stmt = db->prepare(
-        "CREATE TABLE test (id PRIMARY KEY, name STRING, d FLOAT);");
-    assert(stmt->step());
-    db->execute("INSERT INTO test VALUES (1, 'Hello World', 2.5)");
-    db->execute("INSERT INTO test VALUES (4, 'Just a Test', 4.75)");
+    db->execute("CREATE TABLE test (id PRIMARY KEY, name STRING, d FLOAT);");
+
+    auto stmt = db->prepare_stmt("INSERT INTO test VALUES (?, ?, ?)");
+    *stmt = std::make_tuple(1, "Hello World", 2.5);
+    *stmt = std::make_tuple(2, "Just a Test", 4.75);
     auto query = db->prepare<int, std::string, double>("SELECT * FROM test");
     for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
-    stmt = db->prepare("INSERT INTO test VALUES (?, ?, ?)");
-    stmt->bind(3, "And we can bind", 3.14);
-    stmt->step();
+    *stmt = std::make_tuple(3, "And we can bind", 3.14);
+
     for(const auto &r : *query)
     {
         std::cout << std::get<0>(r) << " " << std::get<1>(r) << " "
@@ -118,8 +108,7 @@ int main()
     }
     try
     {
-        stmt->bind(4, "incomplete");
-        stmt->step();
+        *stmt = std::make_tuple(4, "incomplete");
     }
     catch(const error &e)
     {
@@ -163,32 +152,33 @@ int main()
                    std::ostream_iterator<bar>(std::cout, "\n"),
                    [](const auto &r)
                    {
-        return build<bar>(r);
-    });
+                       return build<bar>(r);
+                   });
 
     std::cout << "\nSTL FTW" << std::endl;
     std::transform(begin(*query), end(*query),
                    std::ostream_iterator<bar>(std::cout, "\n"),
-                   build<bar, std::tuple<int, std::string, double>>
-                   );
-
+                   build<bar, std::tuple<int, std::string, double>>);
 
     std::cout << "\nSTL FTW" << std::endl;
     auto con = construct<bar>;
-    auto bound = [&con](const auto& r){ return apply(con, r); };
+    auto bound = [&con](const auto &r)
+    {
+        return apply(con, r);
+    };
 
     std::transform(begin(*query), end(*query),
-                   std::ostream_iterator<bar>(std::cout, "\n"),
-                   bound
-                   );
-
+                   std::ostream_iterator<bar>(std::cout, "\n"), bound);
 
     std::cout << "\nNULL Query" << std::endl;
     db->execute("INSERT INTO test VALUES (7, NULL, NULL)");
-    auto optional_query = db->prepare<int, optional<std::string>, optional<double>>("SELECT * FROM test");
-      for(const auto &r : *optional_query)
+    auto optional_query =
+        db->prepare<int, optional<std::string>, optional<double>>(
+            "SELECT * FROM test");
+    for(const auto &r : *optional_query)
     {
-        std::cout << std::get<0>(r) << ", " << std::get<1>(r).value_or("My NULL") << ", "
+        std::cout << std::get<0>(r) << ", "
+                  << std::get<1>(r).value_or("My NULL") << ", "
                   << std::get<2>(r).value_or(0.0) << std::endl;
     }
 }

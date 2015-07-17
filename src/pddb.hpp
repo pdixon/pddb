@@ -22,6 +22,7 @@
 
 #include <experimental/optional>
 #include <cassert>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -35,6 +36,85 @@ using std::experimental::make_optional;
 
 namespace pddb
 {
+
+namespace detail
+{
+template <class F, class... Args>
+inline auto INVOKE(F &&f, Args &&... args)
+    -> decltype(std::forward<F>(f)(std::forward<Args>(args)...))
+{
+    return std::forward<F>(f)(std::forward<Args>(args)...);
+}
+
+template <class Base, class T, class Derived>
+inline auto INVOKE(T Base::*pmd, Derived &&ref)
+    -> decltype(std::forward<Derived>(ref).*pmd)
+{
+    return std::forward<Derived>(ref).*pmd;
+}
+
+template <class PMD, class Pointer>
+inline auto INVOKE(PMD pmd, Pointer &&ptr)
+    -> decltype((*std::forward<Pointer>(ptr)).*pmd)
+{
+    return (*std::forward<Pointer>(ptr)).*pmd;
+}
+
+template <class Base, class T, class Derived, class... Args>
+inline auto INVOKE(T Base::*pmf, Derived &&ref, Args &&... args)
+    -> decltype((std::forward<Derived>(ref).*pmf)(std::forward<Args>(args)...))
+{
+    return (std::forward<Derived>(ref).*pmf)(std::forward<Args>(args)...);
+}
+
+template <class PMF, class Pointer, class... Args>
+inline auto INVOKE(PMF pmf, Pointer &&ptr, Args &&... args)
+    -> decltype(((*std::forward<Pointer>(ptr)).*
+                 pmf)(std::forward<Args>(args)...))
+{
+    return ((*std::forward<Pointer>(ptr)).*pmf)(std::forward<Args>(args)...);
+}
+}
+
+template <class F, class... ArgTypes>
+decltype(auto) invoke(F &&f, ArgTypes &&... args)
+{
+    return detail::INVOKE(std::forward<F>(f), std::forward<ArgTypes>(args)...);
+}
+
+namespace detail
+{
+template <class F, class Tuple, std::size_t... I>
+constexpr decltype(auto) apply_impl(F &&f, Tuple &&t, std::index_sequence<I...>)
+{
+    return invoke(std::forward<F>(f), std::get<I>(std::forward<Tuple>(t))...);
+}
+
+template <class F, class O, class Tuple, std::size_t... I>
+constexpr decltype(auto) apply_impl(F &&f, O &&o, Tuple &&t,
+                                    std::index_sequence<I...>)
+{
+    return invoke(std::forward<F>(f), o,
+                  std::get<I>(std::forward<Tuple>(t))...);
+}
+}
+
+template <class F, class Tuple>
+constexpr decltype(auto) apply(F &&f, Tuple &&t)
+{
+    return detail::apply_impl(
+        std::forward<F>(f), std::forward<Tuple>(t),
+        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>{}>{});
+}
+
+template <class F, class O, class Tuple>
+constexpr decltype(auto) apply(F &&f, O &&o, Tuple &&t)
+{
+    return detail::apply_impl(
+        std::forward<F>(f), std::forward<O>(o), std::forward<Tuple>(t),
+        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>{}>{});
+}
+
 enum class result
 {
     OK = 0, /* Successful result */
@@ -80,9 +160,9 @@ class error : public std::runtime_error
 class database_internal
 {
     friend class database;
+    friend class statement_internal;
     template <typename... TS>
-    friend class statement;
-    friend class transaction;
+    friend class query;
 
   public:
     struct db
@@ -117,6 +197,7 @@ class database_internal
             if(rc != result::OK)
                 throw error(sqlite3_errmsg(db));
         }
+        size_t parameter_count() { return sqlite3_bind_parameter_count(stmt_); }
         void bind(db &db, int column, int value)
         {
             auto rc = result(sqlite3_bind_int(stmt_, column, value));
@@ -248,15 +329,6 @@ class database_internal
         return i.first->get();
     }
 
-    void execute(const std::string &sql)
-    {
-        auto s = prepare(sql);
-        auto rc = result(sqlite3_step(*s));
-        if(rc != result::DONE)
-            throw error(sqlite3_errmsg(*db_));
-        stmt_finalize(s);
-    }
-
   private:
     std::unordered_set<std::unique_ptr<stmt>> statements;
     std::unique_ptr<db> db_;
@@ -328,12 +400,110 @@ optional<std::vector<uint8_t>> get_column(database_internal::stmt *s,
     return s->get_blob(current);
 }
 
+class statement_internal
+{
+  public:
+    statement_internal(const std::string &sql,
+                       std::weak_ptr<database_internal> db)
+        : db(db)
+    {
+        stmt = db.lock()->prepare(sql);
+    }
+
+    ~statement_internal()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            locked->stmt_finalize(stmt);
+        }
+    }
+
+    template <typename... Args>
+    void bind(const Args &... args)
+    {
+        auto required = stmt->parameter_count();
+        auto provided = sizeof...(args);
+
+        if(required > provided)
+        {
+            throw error("Insufficient parameters provided");
+        }
+        if(required < provided)
+        {
+            throw error("Excess parameters provided");
+        }
+        auto locked = db.lock();
+        if(locked)
+        {
+            stmt->clear(*locked->db_);
+            bind_(locked, 1, args...);
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+    template <typename... TS>
+    std::tuple<TS...> row()
+    {
+        int i = 0;
+        return std::make_tuple(get_column<TS>(stmt, i++)...);
+    }
+
+    bool step()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            return stmt->step(*locked->db_);
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+    void reset()
+    {
+        auto locked = db.lock();
+        if(locked)
+        {
+            stmt->reset(*locked->db_);
+        }
+        else
+        {
+            throw error("Database closed");
+        }
+    }
+
+  private:
+    template <typename T, typename... Args>
+    void bind_(std::shared_ptr<database_internal> db_, int current, T first,
+               const Args &... rest)
+    {
+        stmt->bind(*db_->db_, current, first);
+        bind_(db_, current + 1, rest...);
+    }
+
+    void bind_(std::shared_ptr<database_internal>, int)
+    {
+        // catch the end case
+        return;
+    }
+
+    database_internal::stmt *stmt;
+    std::weak_ptr<database_internal> db;
+};
+
 class transaction
 {
   public:
     transaction(std::weak_ptr<database_internal> db) : db(db)
     {
-        db.lock()->execute("BEGIN");
+        auto s = std::make_unique<statement_internal>("BEGIN", db);
+        s->step();
     }
 
     ~transaction() noexcept
@@ -342,7 +512,8 @@ class transaction
         {
             if(!commited)
             {
-                db.lock()->execute("ROLLBACK");
+                auto s = std::make_unique<statement_internal>("ROLLBACK", db);
+                s->step();
             }
         }
         catch(const error &e)
@@ -355,7 +526,8 @@ class transaction
     {
         if(!commited)
         {
-            db.lock()->execute("COMMIT");
+            auto s = std::make_unique<statement_internal>("COMMIT", db);
+            s->step();
             commited = true;
         }
     }
@@ -366,142 +538,116 @@ class transaction
 };
 
 template <typename... TS>
-class statement
+class query
 {
   public:
     class iterator
     {
       public:
-        iterator(statement &s, bool end = false) : s_(s), end_(end) {}
+        iterator(query &q, bool done = false) : done(done), q(q) {}
 
-        std::tuple<TS...> operator*() { return s_.row(); }
+        std::tuple<TS...> operator*() { return q.row(); }
 
         iterator &operator++()
         {
-            end_ = s_.step();
+            done = q.stmt->step();
             return *this;
         }
 
-        bool operator!=(const iterator &rhs) { return end_ != rhs.end_; }
+        bool operator!=(const iterator &rhs) { return done != rhs.done; }
 
       private:
-        statement &s_;
-        bool end_;
+        bool done;
+        query &q;
     };
 
-    statement(database_internal::stmt *s, std::weak_ptr<database_internal> db)
-        : stmt_(s), db(db)
+    query(const std::string &sql, std::weak_ptr<database_internal> db)
+        : stmt(std::make_unique<statement_internal>(sql, db))
     {
-    }
-
-    ~statement()
-    {
-        auto locked = db.lock();
-        if(locked)
-        {
-            locked->stmt_finalize(stmt_);
-        }
     }
 
     template <typename... Args>
     void bind(const Args &... args)
     {
-        auto locked = db.lock();
-        if(locked)
-        {
-            stmt_->clear(*locked->db_);
-            bind_(locked, 1, args...);
-        }
-        else
-        {
-            throw error("Database closed");
-        }
+        stmt->bind(args...);
     }
 
-    bool step()
-    {
-        auto locked = db.lock();
-        if(locked)
-        {
-            return stmt_->step(*locked->db_);
-        }
-        else
-        {
-            throw error("Database closed");
-        }
-    }
-
-    std::tuple<TS...> row()
-    {
-        int i = 0;
-        return std::make_tuple(get_column<TS>(stmt_, i++)...);
-    }
+    std::tuple<TS...> row() { return stmt->row<TS...>(); }
 
     iterator begin()
     {
-        auto locked = db.lock();
-        if(locked)
-        {
-            stmt_->reset(*locked->db_);
-            return iterator{*this};
-        }
-        else
-        {
-            throw error("Database closed");
-        }
+        stmt->reset();
+        stmt->step();
+        return iterator(*this);
     }
 
-    iterator end() { return iterator{*this, true}; }
+    iterator end() { return iterator(*this, true); }
 
   private:
-    template <typename T, typename... Args>
-    void bind_(std::shared_ptr<database_internal> db_, int current, T first,
-               const Args &... rest)
+    std::unique_ptr<statement_internal> stmt;
+};
+
+class statement
+{
+  public:
+    statement(const std::string &sql, std::weak_ptr<database_internal> db)
+        : stmt(std::make_unique<statement_internal>(sql, db))
     {
-        stmt_->bind(*db_->db_, current, first);
-        bind_(db_, current + 1, rest...);
     }
 
-    void bind_(std::shared_ptr<database_internal>, int)
+    statement &operator++()
     {
-        // catch the end case
-        return;
+        // no-op.
+        return *this;
     }
 
-    database_internal::stmt *stmt_;
-    std::weak_ptr<database_internal> db;
+    template <typename... TS>
+    statement &operator=(const std::tuple<TS...> &rhs)
+    {
+        stmt->reset();
+        apply(&statement_internal::bind<TS...>, stmt, rhs);
+        stmt->step();
+        return *this;
+    }
+
+  private:
+    std::unique_ptr<statement_internal> stmt;
 };
 
 class database
 {
   public:
-    database()
-        : db(std::make_shared<database_internal>(":memory:",
-                                                 SQLITE_OPEN_READWRITE))
-    {
-    }
+    database() : database(":memory:", SQLITE_OPEN_READWRITE) {}
+
     database(const std::string &path, int flags)
         : db(std::make_shared<database_internal>(path, flags))
     {
     }
+
     std::unique_ptr<transaction> start_transaction()
     {
         return std::make_unique<transaction>(db);
     }
 
     template <typename... TS>
-    std::unique_ptr<statement<TS...>> prepare(const std::string &sql)
+    std::unique_ptr<query<TS...>> prepare(const std::string &sql)
     {
-        return std::make_unique<statement<TS...>>(db->prepare(sql), db);
+        return std::make_unique<query<TS...>>(sql, db);
     }
 
-    void execute(const std::string& sql)
+    std::unique_ptr<statement> prepare_stmt(const std::string &sql)
     {
-        db->execute(sql);
+        return std::make_unique<statement>(sql, db);
+    }
+
+    template <typename... Args>
+    void execute(const std::string &sql, Args &... args)
+    {
+        auto s = prepare_stmt(sql);
+        *s = std::make_tuple(args...);
     }
 
   private:
     std::shared_ptr<database_internal> db;
 };
 };
-
