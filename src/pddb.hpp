@@ -115,6 +115,28 @@ constexpr decltype(auto) apply(F &&f, O &&o, Tuple &&t)
         std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>{}>{});
 }
 
+template <class T>
+struct remove_optional
+{
+    using type = T;
+};
+
+template <class T>
+struct remove_optional<optional<T>>
+{
+    using type = T;
+};
+
+template <class T>
+struct is_optional : std::false_type
+{
+};
+
+template <class T>
+struct is_optional<optional<T>> : std::true_type
+{
+};
+
 enum class result
 {
     OK = 0, /* Successful result */
@@ -335,67 +357,39 @@ class database_internal
 };
 
 template <typename T>
-T get_column(database_internal::stmt *s, int current);
+T get_column_(database_internal::stmt *s, int current);
 
-template <>
-int get_column(database_internal::stmt *s, int current)
+template <typename T>
+T get_column_(database_internal::stmt *s, int current)
 {
-    return s->get_int(current).value_or(0);
-}
-
-#if 0
-template <>
-optional<int> get_column(database_internal::stmt *s, int current)
-{
-    return s->get_int(current);
-}
-#endif
-
-template <>
-int64_t get_column(database_internal::stmt *s, int current)
-{
-    return s->get_int(current).value_or(0);
+    using inner = typename remove_optional<T>::type;
+    static_assert(std::is_integral<inner>::value, "");
+    auto i = s->get_int(current);
+    if(i)
+    {
+        return make_optional(static_cast<inner>(*i));
+    }
+    else
+    {
+        return optional<inner>();
+    }
 }
 
 template <>
-optional<int64_t> get_column(database_internal::stmt *s, int current)
-{
-    return s->get_int(current);
-}
-
-template <>
-double get_column(database_internal::stmt *s, int current)
-{
-    return s->get_double(current).value_or(0.0);
-}
-
-template <>
-optional<double> get_column(database_internal::stmt *s, int current)
+optional<double> get_column_(database_internal::stmt *s, int current)
 {
     return s->get_double(current);
 }
 
 template <>
-std::string get_column(database_internal::stmt *s, int current)
-{
-    return s->get_string(current).value_or("");
-}
-
-template <>
-optional<std::string> get_column(database_internal::stmt *s, int current)
+optional<std::string> get_column_(database_internal::stmt *s, int current)
 {
     return s->get_string(current);
 }
 
 template <>
-std::vector<uint8_t> get_column(database_internal::stmt *s, int current)
-{
-    return s->get_blob(current).value_or(std::vector<uint8_t>());
-}
-
-template <>
-optional<std::vector<uint8_t>> get_column(database_internal::stmt *s,
-                                          int current)
+optional<std::vector<uint8_t>> get_column_(database_internal::stmt *s,
+                                           int current)
 {
     return s->get_blob(current);
 }
@@ -449,7 +443,7 @@ class statement_internal
     std::tuple<TS...> row()
     {
         int i = 0;
-        return std::make_tuple(get_column<TS>(stmt, i++)...);
+        return std::make_tuple(get_column<TS>(i++)...);
     }
 
     bool step()
@@ -491,6 +485,18 @@ class statement_internal
     {
         // catch the end case
         return;
+    }
+
+    template <typename T>
+    std::enable_if_t<is_optional<T>::value, T> get_column(int current)
+    {
+        return get_column_<T>(stmt, current);
+    }
+
+    template <typename T>
+    std::enable_if_t<!(is_optional<T>::value), T> get_column(int current)
+    {
+        return get_column_<optional<T>>(stmt, current).value_or(T());
     }
 
     database_internal::stmt *stmt;
