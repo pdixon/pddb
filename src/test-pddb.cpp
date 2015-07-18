@@ -181,10 +181,9 @@ int main()
                   << std::get<1>(r).value_or("My NULL") << ", "
                   << std::get<2>(r).value_or(0.0) << std::endl;
     }
-     for(const auto &r : *query)
+    for(const auto &r : *query)
     {
-        std::cout << std::get<0>(r) << ", "
-                  << std::get<1>(r) << ", "
+        std::cout << std::get<0>(r) << ", " << std::get<1>(r) << ", "
                   << std::get<2>(r) << std::endl;
     }
 }

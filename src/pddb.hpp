@@ -442,8 +442,8 @@ class statement_internal
     template <typename... TS>
     std::tuple<TS...> row()
     {
-        int i = 0;
-        return std::make_tuple(get_column<TS>(i++)...);
+        auto seq = std::make_index_sequence<sizeof...(TS)>{};
+        return row_<std::tuple<TS...>>(seq);
     }
 
     bool step()
@@ -485,6 +485,12 @@ class statement_internal
     {
         // catch the end case
         return;
+    }
+
+    template <typename T, size_t... Is>
+    T row_(std::index_sequence<Is...>)
+    {
+        return T(get_column<typename std::tuple_element_t<Is, T>>(Is)...);
     }
 
     template <typename T>
