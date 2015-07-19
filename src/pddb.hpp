@@ -200,57 +200,31 @@ class database_internal
     {
         stmt(sqlite3_stmt *stmt) : stmt_(stmt) {}
         ~stmt() { sqlite3_finalize(stmt_); }
-        void clear(db &db)
-        {
-            auto rc = result(sqlite3_clear_bindings(stmt_));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
-        }
-        bool step(db &db)
-        {
-            auto rc = result(sqlite3_step(stmt_));
-            if(rc < result::ROW)
-                throw error(sqlite3_errmsg(db));
-            return rc == result::DONE;
-        }
-        void reset(db &db)
-        {
-            auto rc = result(sqlite3_reset(stmt_));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
-        }
+        result clear() { return result(sqlite3_clear_bindings(stmt_)); }
+        result step() { return result(sqlite3_step(stmt_)); }
+        result reset() { return result(sqlite3_reset(stmt_)); }
         size_t parameter_count() { return sqlite3_bind_parameter_count(stmt_); }
-        void bind(db &db, int column, int value)
+        result bind(int column, int value)
         {
-            auto rc = result(sqlite3_bind_int(stmt_, column, value));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
+            return result(sqlite3_bind_int(stmt_, column, value));
         }
-        void bind(db &db, int column, int64_t value)
+        result bind(int column, int64_t value)
         {
-            auto rc = result(sqlite3_bind_int64(stmt_, column, value));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
+            return result(sqlite3_bind_int64(stmt_, column, value));
         }
-        void bind(db &db, int column, double value)
+        result bind(int column, double value)
         {
-            auto rc = result(sqlite3_bind_double(stmt_, column, value));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
+            return result(sqlite3_bind_double(stmt_, column, value));
         }
-        void bind(db &db, int column, std::string value)
+        result bind(int column, std::string value)
         {
-            auto rc = result(sqlite3_bind_text(stmt_, column, value.c_str(), -1,
-                                               SQLITE_TRANSIENT));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
+            return result(sqlite3_bind_text(stmt_, column, value.c_str(), -1,
+                                            SQLITE_TRANSIENT));
         }
-        void bind(db &db, int column, std::vector<uint8_t> value)
+        result bind(int column, std::vector<uint8_t> value)
         {
-            auto rc = result(sqlite3_bind_blob(stmt_, column, value.data(),
-                                               value.size(), SQLITE_TRANSIENT));
-            if(rc != result::OK)
-                throw error(sqlite3_errmsg(db));
+            return result(sqlite3_bind_blob(stmt_, column, value.data(),
+                                            value.size(), SQLITE_TRANSIENT));
         }
         optional<double> get_double(int column)
         {
@@ -351,6 +325,11 @@ class database_internal
         return i.first->get();
     }
 
+    std::string err_msg(result r)
+    {
+        return sqlite3_errstr(static_cast<int>(r));
+    }
+
   private:
     std::unordered_set<std::unique_ptr<stmt>> statements;
     std::unique_ptr<db> db_;
@@ -430,8 +409,10 @@ class statement_internal
         auto locked = db.lock();
         if(locked)
         {
-            stmt->clear(*locked->db_);
-            bind_(locked, 1, args...);
+            auto rc = stmt->clear();
+            if(rc != result::OK)
+                throw error(locked->err_msg(rc));
+            bind_(1, args...);
         }
         else
         {
@@ -451,7 +432,10 @@ class statement_internal
         auto locked = db.lock();
         if(locked)
         {
-            return stmt->step(*locked->db_);
+            auto rc = stmt->step();
+            if(rc < result::ROW)
+                throw error(locked->err_msg(rc));
+            return rc == result::DONE;
         }
         else
         {
@@ -464,7 +448,9 @@ class statement_internal
         auto locked = db.lock();
         if(locked)
         {
-            stmt->reset(*locked->db_);
+            auto rc = stmt->reset();
+            if(rc != result::OK)
+                throw error(locked->err_msg(rc));
         }
         else
         {
@@ -474,14 +460,15 @@ class statement_internal
 
   private:
     template <typename T, typename... Args>
-    void bind_(std::shared_ptr<database_internal> db_, int current, T first,
-               const Args &... rest)
+    void bind_(int current, T first, const Args &... rest)
     {
-        stmt->bind(*db_->db_, current, first);
-        bind_(db_, current + 1, rest...);
+        auto rc = stmt->bind(current, first);
+        if(rc != result::OK)
+            throw error(db.lock()->err_msg(rc));
+        bind_(current + 1, rest...);
     }
 
-    void bind_(std::shared_ptr<database_internal>, int)
+    void bind_(int)
     {
         // catch the end case
         return;
